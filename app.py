@@ -1,569 +1,347 @@
-#!/usr/bin/env python3
 """
-IGNOU RC-71 Assignment Filter & Award List Generator
-Run: python3 app.py   →  open http://localhost:5050
+IGNOU Award/Grade List document generator.
+One page per course — each course gets its own full IGNOU form page.
 """
-import io, re, zipfile, json
-from collections import OrderedDict
-from flask import Flask, request, send_file, render_template_string
-from docgen import generate_award_list
+import io
+from docx import Document
+from docx.shared import Pt, Cm, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
-app = Flask(__name__)
+# ─────────────────────────────────────────────────────────────
+# Low-level XML helpers
+# ─────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-HTML = r"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>IGNOU RC-71 · Award List Generator</title>
-<style>
-:root{
-  --bg:#0d1117;--s:#161b22;--s2:#21262d;--bd:#30363d;
-  --ac:#58a6ff;--ac2:#7c5fe6;--gr:#3fb950;--re:#f85149;
-  --tx:#c9d1d9;--mu:#8b949e;
-}
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--bg);color:var(--tx);font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh}
-
-/* ── Header ── */
-header{
-  background:linear-gradient(135deg,#0d2137 0%,#161b22 100%);
-  border-bottom:2px solid var(--ac);
-  padding:14px 28px;display:flex;align-items:center;gap:14px;
-}
-.logo{font-size:22px;font-weight:800;letter-spacing:2px;
-  background:linear-gradient(90deg,#58a6ff,#7c5fe6);
-  -webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.sub{color:var(--mu);font-size:11px;letter-spacing:1px;text-transform:uppercase;margin-top:3px}
-
-.container{max-width:1320px;margin:0 auto;padding:22px 20px}
-
-/* ── Upload ── */
-.upload-zone{
-  background:var(--s);border:2px dashed var(--bd);border-radius:14px;
-  padding:40px 28px;text-align:center;cursor:pointer;
-  transition:all .2s;position:relative;margin-bottom:18px;
-}
-.upload-zone:hover,.upload-zone.drag{border-color:var(--ac);background:#1a2030}
-.upload-zone input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
-.upload-zone h2{font-size:17px;margin:8px 0 5px}
-.upload-zone p{color:var(--mu);font-size:13px}
-.uz-icon{font-size:42px;margin-bottom:4px}
-
-/* ── Stats ── */
-.stats{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
-.stat{background:var(--s);border:1px solid var(--bd);border-radius:10px;
-  padding:11px 16px;flex:1;min-width:110px}
-.stat .l{color:var(--mu);font-size:10px;text-transform:uppercase;letter-spacing:1px}
-.stat .v{font-size:22px;font-weight:700;color:var(--ac)}
-
-/* ── Controls card ── */
-.card{background:var(--s);border:1px solid var(--bd);border-radius:12px;
-  padding:16px 20px;margin-bottom:16px}
-.card-title{font-size:11px;color:var(--mu);text-transform:uppercase;
-  letter-spacing:1px;margin-bottom:12px;font-weight:600}
-
-/* ── Session picker ── */
-.session-row{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
-.session-label{font-size:12px;color:var(--mu);text-transform:uppercase;
-  letter-spacing:1px;font-weight:600;white-space:nowrap}
-.sess-btn{
-  padding:7px 18px;border-radius:20px;border:1px solid var(--bd);
-  background:var(--s2);color:var(--tx);font-size:13px;font-weight:600;
-  cursor:pointer;transition:all .15s;
-}
-.sess-btn.on{background:rgba(88,166,255,.18);border-color:var(--ac);color:var(--ac)}
-.sess-btn:hover{border-color:var(--ac)}
-
-/* ── Course pills ── */
-.pills{display:flex;flex-wrap:wrap;gap:7px;margin-bottom:12px}
-.pill{
-  background:var(--s2);border:1px solid var(--bd);border-radius:20px;
-  padding:5px 13px;font-size:12px;cursor:pointer;
-  transition:all .15s;user-select:none;
-}
-.pill:hover{border-color:var(--ac);color:var(--ac)}
-.pill.on{background:rgba(88,166,255,.15);border-color:var(--ac);color:var(--ac)}
-.pill.all.on{background:rgba(124,95,230,.15);border-color:var(--ac2);color:var(--ac2)}
-
-/* ── Search + reset row ── */
-.row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
-.cg{flex:1;min-width:180px}
-.cg label{display:block;font-size:11px;color:var(--mu);
-  text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
-input[type=text]{
-  width:100%;background:var(--s2);border:1px solid var(--bd);
-  border-radius:7px;color:var(--tx);padding:9px 12px;
-  font-size:13px;outline:none;transition:border-color .2s;
-}
-input[type=text]:focus{border-color:var(--ac)}
-
-/* ── Buttons ── */
-.btn{padding:9px 18px;border-radius:7px;border:none;
-  font-size:13px;font-weight:600;cursor:pointer;
-  transition:all .15s;white-space:nowrap}
-.btn-g{background:linear-gradient(135deg,#1a7f37,#3fb950);color:#fff}
-.btn-p{background:linear-gradient(135deg,#1f6feb,#7c5fe6);color:#fff}
-.btn-o{background:transparent;border:1px solid var(--ac);color:var(--ac)}
-.btn:hover{opacity:.85;transform:translateY(-1px)}
-.btn:disabled{opacity:.35;cursor:not-allowed;transform:none}
-
-/* ── Table ── */
-.tw{background:var(--s);border:1px solid var(--bd);border-radius:12px;
-  overflow:hidden;margin-bottom:14px}
-.tw-head{display:flex;justify-content:space-between;align-items:center;
-  padding:12px 16px;border-bottom:1px solid var(--bd)}
-.tw-head h3{font-size:14px}
-.rc{background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.25);
-  color:var(--ac);border-radius:16px;padding:3px 12px;
-  font-size:12px;font-weight:600}
-.ts{overflow-x:auto;max-height:460px;overflow-y:auto}
-table{width:100%;border-collapse:collapse;font-size:12px}
-thead{position:sticky;top:0;z-index:9;background:#0d2137}
-th{padding:9px 12px;text-align:left;font-size:10px;text-transform:uppercase;
-  letter-spacing:1px;color:var(--mu);border-bottom:1px solid var(--bd);white-space:nowrap}
-tbody tr{border-bottom:1px solid rgba(48,54,61,.5);transition:background .1s}
-tbody tr:hover{background:var(--s2)}
-td{padding:8px 12px;white-space:nowrap}
-.ec{font-family:monospace;color:var(--ac);font-weight:600}
-.cb{background:rgba(124,95,230,.12);border:1px solid rgba(124,95,230,.25);
-  color:#a78bfa;border-radius:5px;padding:2px 8px;font-size:11px;font-weight:600}
-.mc{font-weight:700;color:var(--gr)}
-.nd{text-align:center;color:var(--mu);padding:50px;font-size:14px}
-
-/* ── Export row ── */
-.exp{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-bottom:8px}
-
-/* ── Selected courses summary ── */
-.sel-summary{
-  background:rgba(88,166,255,.07);border:1px solid rgba(88,166,255,.2);
-  border-radius:8px;padding:8px 14px;font-size:12px;color:var(--mu);
-  margin-bottom:10px;line-height:1.6;
-}
-.sel-summary strong{color:var(--ac)}
-
-/* ── Toast ── */
-.toast{
-  position:fixed;bottom:20px;right:20px;padding:12px 20px;
-  border-radius:9px;font-weight:600;font-size:13px;
-  transform:translateY(70px);opacity:0;transition:all .3s;
-  z-index:999;box-shadow:0 6px 20px rgba(0,0,0,.4);
-}
-.toast.show{transform:translateY(0);opacity:1}
-.toast.ok{background:#1a7f37;color:#fff}
-.toast.err{background:#da3633;color:#fff}
-
-::-webkit-scrollbar{width:5px;height:5px}
-::-webkit-scrollbar-track{background:var(--s)}
-::-webkit-scrollbar-thumb{background:var(--bd);border-radius:3px}
-.hidden{display:none!important}
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <div class="logo">📋 IGNOU RC-71</div>
-    <div class="sub">Assignment Filter &amp; Award List Generator · 100% Offline</div>
-  </div>
-</header>
-
-<div class="container">
-
-  <!-- Upload -->
-  <div class="upload-zone" id="uz">
-    <input type="file" id="fi" accept=".xlsx,.xls,.csv">
-    <div class="uz-icon">📂</div>
-    <h2>Upload Excel / CSV File</h2>
-    <p>Drag &amp; drop or click to browse · Works 100% offline</p>
-  </div>
-
-  <!-- Stats -->
-  <div class="stats hidden" id="sb">
-    <div class="stat"><div class="l">Total Records</div><div class="v" id="sTot">0</div></div>
-    <div class="stat"><div class="l">Unique Students</div><div class="v" id="sStu">0</div></div>
-    <div class="stat"><div class="l">Unique Courses</div><div class="v" id="sCrs">0</div></div>
-    <div class="stat"><div class="l">Filtered</div><div class="v" id="sFil">0</div></div>
-  </div>
-
-  <!-- Controls -->
-  <div class="card hidden" id="ctrl">
-    <div class="card-title">🗓 Session</div>
-    <div class="session-row">
-      <span class="session-label">TEE Session:</span>
-      <button class="sess-btn on" id="sJun" onclick="setSession('Jun')">☀️ June</button>
-      <button class="sess-btn"   id="sDec" onclick="setSession('Dec')">❄️ December</button>
-      <span id="sessionYear" style="color:var(--mu);font-size:12px">Year: <strong id="yrDisplay" style="color:var(--ac)">2024</strong></span>
-      <input type="number" id="yrInput" value="2024" min="2020" max="2030"
-        style="width:80px;background:var(--s2);border:1px solid var(--bd);border-radius:7px;
-               color:var(--tx);padding:6px 10px;font-size:13px;outline:none"
-        oninput="document.getElementById('yrDisplay').textContent=this.value">
-    </div>
-
-    <div class="card-title">🎯 Filter by Course ID</div>
-    <div class="pills" id="pills"></div>
-
-    <div class="row">
-      <div class="cg">
-        <label>Search Enrollment / Name</label>
-        <input type="text" id="srch" placeholder="Type to search...">
-      </div>
-      <button class="btn btn-o" onclick="resetF()">↺ Reset All</button>
-    </div>
-  </div>
-
-  <!-- Selection summary -->
-  <div class="sel-summary hidden" id="selSum"></div>
-
-  <!-- Table -->
-  <div class="tw hidden" id="tw">
-    <div class="tw-head">
-      <h3>📄 Candidate Records</h3>
-      <span class="rc" id="rc">0 records</span>
-    </div>
-    <div class="ts">
-      <table><thead id="tH"></thead><tbody id="tB"></tbody></table>
-    </div>
-  </div>
-
-  <!-- Export -->
-  <div class="exp hidden" id="ep">
-    <button class="btn btn-g" id="btnDoc" onclick="exportDoc()">
-      📄 Export IGNOU Award List (.docx) — 1 page per course
-    </button>
-    <button class="btn btn-p" onclick="exportXL()">⬇ Export to Excel</button>
-  </div>
-
-</div>
-<div class="toast" id="toast"></div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script>
-// ── State ──
-let all=[], hdrs=[], enrollIdx=-1, courseIdx=-1, nameIdx=-1, progIdx=-1;
-const sel = new Set();
-let sessionMonth = 'Jun';
-
-// ── Session ──
-function setSession(m){
-  sessionMonth = m;
-  document.getElementById('sJun').classList.toggle('on', m==='Jun');
-  document.getElementById('sDec').classList.toggle('on', m==='Dec');
-}
-
-function getSessionLabel(){
-  const yr = document.getElementById('yrInput').value || '2024';
-  return sessionMonth + ' ' + yr;   // e.g. "Jun 2024" or "Dec 2024"
-}
-
-// ── Column detection ──
-function detectCols(h){
-  const n = h.map(x => String(x).toLowerCase().replace(/[\s_\-]/g,''));
-  enrollIdx = n.findIndex(x => x.includes('enroll') || x.includes('rollno'));
-  courseIdx = n.findIndex(x => x.includes('course') || x.includes('subject'));
-  nameIdx   = n.findIndex(x => x.includes('name'));
-  progIdx   = n.findIndex(x => x.includes('prog') || x.includes('programme') || x.includes('stream'));
-  if(enrollIdx<0) enrollIdx=0;
-  if(courseIdx<0) courseIdx=3;
-  if(nameIdx<0)   nameIdx=2;
-  if(progIdx<0)   progIdx=3;
-}
-
-// ── File loading ──
-document.getElementById('fi').onchange = e => loadFile(e.target.files[0]);
-const uz = document.getElementById('uz');
-uz.ondragover = e => { e.preventDefault(); uz.classList.add('drag'); };
-uz.ondragleave = () => uz.classList.remove('drag');
-uz.ondrop = e => { e.preventDefault(); uz.classList.remove('drag'); loadFile(e.dataTransfer.files[0]); };
-
-function loadFile(f){
-  if(!f) return;
-  const r = new FileReader();
-  r.onload = e => {
-    try{
-      const wb  = XLSX.read(new Uint8Array(e.target.result), {type:'array'});
-      const raw = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {header:1,defval:''});
-      let hi = 0;
-      for(let i=0; i<Math.min(6,raw.length); i++){
-        if(raw[i].filter(c=>String(c).trim()).length >= 3){ hi=i; break; }
-      }
-      hdrs = raw[hi].map(h => String(h).trim());
-      all  = [];
-      for(let i=hi+1; i<raw.length; i++){
-        const row = raw[i];
-        if(!row.some(c=>String(c).trim())) continue;
-        const obj = {};
-        hdrs.forEach((h,j) => { obj[h] = row[j] !== undefined ? row[j] : ''; });
-        all.push(obj);
-      }
-      detectCols(hdrs);
-      uz.querySelector('h2').textContent = '✅ Loaded: ' + f.name;
-      uz.querySelector('p').textContent  = all.length + ' records · ' + wb.SheetNames[0];
-      buildPills();
-      updateStats();
-      render();
-      ['sb','ctrl','tw','ep'].forEach(id => show(id));
-      toast('✅ Loaded ' + all.length + ' records!');
-    } catch(err){ toast('Error: ' + err.message, true); }
-  };
-  r.readAsArrayBuffer(f);
-}
-
-// ── Pills ──
-function buildPills(){
-  const ck = hdrs[courseIdx];
-  const courses = [...new Set(all.map(r => String(r[ck]||'').trim()))].filter(Boolean).sort();
-  const c = document.getElementById('pills');
-  c.innerHTML = '';
-  const ap = document.createElement('span');
-  ap.className = 'pill all on'; ap.textContent = '★ All Courses'; ap.dataset.c = '__ALL__';
-  ap.onclick = () => toggle('__ALL__', ap);
-  c.appendChild(ap);
-  courses.forEach(cr => {
-    const p = document.createElement('span');
-    p.className = 'pill'; p.textContent = cr; p.dataset.c = cr;
-    p.onclick = () => toggle(cr, p);
-    c.appendChild(p);
-  });
-  sel.clear();
-  document.getElementById('srch').oninput = render;
-}
-
-function toggle(c, el){
-  const pills = document.querySelectorAll('#pills .pill');
-  if(c === '__ALL__'){
-    sel.clear();
-    pills.forEach(p => p.classList.remove('on'));
-    el.classList.add('on');
-  } else {
-    document.querySelector('.pill.all').classList.remove('on');
-    sel.has(c) ? sel.delete(c) : sel.add(c);
-    el.classList.toggle('on');
-    if(!sel.size) document.querySelector('.pill.all').classList.add('on');
-  }
-  render();
-}
-
-function resetF(){
-  sel.clear();
-  document.querySelectorAll('#pills .pill').forEach(p => p.classList.remove('on'));
-  document.querySelector('.pill.all').classList.add('on');
-  document.getElementById('srch').value = '';
-  render();
-}
-
-// ── Filtering ──
-function getFiltered(){
-  const s  = document.getElementById('srch').value.toLowerCase().trim();
-  const ck = hdrs[courseIdx], ek = hdrs[enrollIdx];
-  let f = all.filter(r => {
-    if(sel.size && !sel.has(String(r[ck]||'').trim())) return false;
-    if(s) return Object.values(r).some(v => String(v).toLowerCase().includes(s));
-    return true;
-  });
-  f.sort((a,b) => {
-    const ea = String(a[ek]||'').trim(), eb = String(b[ek]||'').trim();
-    const na = parseInt(ea.replace(/\D/g,'')), nb = parseInt(eb.replace(/\D/g,''));
-    return (!isNaN(na) && !isNaN(nb)) ? na-nb : ea.localeCompare(eb);
-  });
-  return f;
-}
-
-// ── Render table ──
-function render(){
-  const f  = getFiltered();
-  const ek = hdrs[enrollIdx], ck = hdrs[courseIdx];
-
-  document.getElementById('tH').innerHTML =
-    '<tr><th>#</th>' + hdrs.map(h=>'<th>'+h+'</th>').join('') + '</tr>';
-
-  const tb = document.getElementById('tB');
-  if(!f.length){
-    tb.innerHTML = '<tr><td colspan="'+(hdrs.length+1)+'" class="nd">No records match your filters.</td></tr>';
-  } else {
-    tb.innerHTML = f.map((r,i) => {
-      const cells = hdrs.map(h => {
-        const v = r[h] !== undefined ? r[h] : '';
-        if(h===ek) return '<td class="ec">'+v+'</td>';
-        if(h===ck) return '<td><span class="cb">'+v+'</span></td>';
-        if(String(h).toLowerCase().includes('mark')||String(h).toLowerCase().includes('obtain'))
-          return '<td class="mc">'+v+'</td>';
-        return '<td>'+v+'</td>';
-      }).join('');
-      return '<tr><td style="color:var(--mu);font-size:11px">'+(i+1)+'</td>'+cells+'</tr>';
-    }).join('');
-  }
-
-  document.getElementById('rc').textContent = f.length + ' record' + (f.length!==1?'s':'');
-  document.getElementById('sFil').textContent = f.length;
-
-  // Selected courses summary
-  const ck2 = hdrs[courseIdx];
-  const activeCourses = sel.size > 0 ? [...sel].sort() :
-    [...new Set(all.map(r=>String(r[ck2]||'').trim()))].filter(Boolean).sort();
-  const sumEl = document.getElementById('selSum');
-  if(activeCourses.length > 1){
-    const counts = activeCourses.map(c => {
-      const n = f.filter(r => String(r[ck2]||'').trim()===c).length;
-      return `<strong>${c}</strong> (${n})`;
-    });
-    sumEl.innerHTML = '📄 Will generate <strong>' + activeCourses.length +
-      ' pages</strong> — one per course: ' + counts.join(' · ');
-    show('selSum');
-  } else if(activeCourses.length === 1){
-    const n = f.filter(r=>String(r[ck2]||'').trim()===activeCourses[0]).length;
-    sumEl.innerHTML = '📄 1 page for <strong>'+activeCourses[0]+'</strong> — '+n+' candidate'+(n!==1?'s':'');
-    show('selSum');
-  } else {
-    sumEl.classList.add('hidden');
-  }
-}
-
-function updateStats(){
-  const ek = hdrs[enrollIdx], ck = hdrs[courseIdx];
-  document.getElementById('sTot').textContent = all.length;
-  document.getElementById('sStu').textContent = new Set(all.map(r=>r[ek])).size;
-  document.getElementById('sCrs').textContent = new Set(all.map(r=>r[ck])).size;
-  document.getElementById('sFil').textContent = all.length;
-}
-
-// ── Excel export ──
-function exportXL(){
-  const f = getFiltered();
-  if(!f.length){ toast('No data!', true); return; }
-  const ws = XLSX.utils.aoa_to_sheet([hdrs, ...f.map(r=>hdrs.map(h=>r[h]||''))]);
-  ws['!cols'] = hdrs.map(()=>({wch:20}));
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Filtered');
-  XLSX.writeFile(wb, 'IGNOU_' + ([...sel].join('_')||'ALL') + '.xlsx');
-  toast('✅ Excel exported!');
-}
-
-// ── Word export (one page per course) ──
-async function exportDoc(){
-  const f = getFiltered();
-  if(!f.length){ toast('No data to export!', true); return; }
-
-  const btn = document.getElementById('btnDoc');
-  btn.disabled = true;
-  btn.textContent = '⏳ Generating...';
-
-  try {
-    const ek = hdrs[enrollIdx], nk = hdrs[nameIdx], pk = hdrs[progIdx], ck = hdrs[courseIdx];
-
-    // Group by course (preserving sorted order)
-    const courseMap = {};
-    f.forEach(r => {
-      const course = String(r[ck]||'').trim();
-      if(!courseMap[course]) courseMap[course] = [];
-      courseMap[course].push({
-        enrollment: String(r[ek]||''),
-        name:       String(r[nk]||''),
-        programme:  String(r[pk]||''),
-      });
-    });
-
-    const payload = {
-      courseMap,
-      sessionLabel: getSessionLabel(),
-    };
-
-    const resp = await fetch('/generate_doc', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
-    });
-    if(!resp.ok) throw new Error(await resp.text());
-
-    const blob = await resp.blob();
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    const sessionLabel = getSessionLabel().replace(' ','_');
-    const courses = Object.keys(courseMap);
-    const fname = courses.length === 1
-      ? `IGNOU_Award_${courses[0]}_${sessionLabel}.docx`
-      : `IGNOU_Award_${courses.length}_Courses_${sessionLabel}.docx`;
-    a.href = url; a.download = fname; a.click();
-    URL.revokeObjectURL(url);
-
-    toast(`✅ Generated ${courses.length} page${courses.length!==1?'s':''} — downloaded!`);
-  } catch(err){
-    toast('Error: ' + err.message, true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '📄 Export IGNOU Award List (.docx) — 1 page per course';
-  }
-}
-
-function show(id){ document.getElementById(id).classList.remove('hidden'); }
-function toast(m, isErr=false){
-  const t = document.getElementById('toast');
-  t.textContent = m;
-  t.className   = 'toast ' + (isErr ? 'err' : 'ok');
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3500);
-}
-</script>
-</body>
-</html>"""
+def _tc_is_continuation(tc):
+    tcPr = tc.find(qn('w:tcPr'))
+    if tcPr is None:
+        return False
+    vm = tcPr.find(qn('w:vMerge'))
+    return vm is not None and vm.get(qn('w:val')) is None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-
-def fix_zoom(docx_bytes):
-    """Fix missing w:percent on w:zoom (python-docx default bug)."""
-    buf = io.BytesIO(docx_bytes)
-    out = io.BytesIO()
-    with zipfile.ZipFile(buf, 'r') as zin, \
-         zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if item.filename == 'word/settings.xml':
-                data = re.sub(
-                    rb'(<w:zoom\b(?![^>]*w:percent)[^/]*)(/?>)',
-                    rb'\1 w:percent="100"\2',
-                    data
-                )
-            zout.writestr(item, data)
-    return out.getvalue()
+def _get_or_create_tcPr(tc):
+    tcPr = tc.find(qn('w:tcPr'))
+    if tcPr is None:
+        tcPr = OxmlElement('w:tcPr')
+        tc.insert(0, tcPr)
+    return tcPr
 
 
-@app.route('/')
-def index():
-    return render_template_string(HTML)
-
-
-@app.route('/generate_doc', methods=['POST'])
-def generate_doc():
-    data          = request.json
-    course_map    = data.get('courseMap', {})
-    session_label = data.get('sessionLabel', 'Dec 2024')
-
-    # course_map is {courseCode: [candidate dicts]} already grouped by JS
-    buf       = generate_award_list(course_map, session_label)
-    raw_bytes = buf.read()
-    fixed     = fix_zoom(raw_bytes)
-
-    courses   = list(course_map.keys())
-    if len(courses) == 1:
-        fname = f'IGNOU_Award_{courses[0]}_{session_label.replace(" ","_")}.docx'
+def apply_borders(tc, sz='4', color='000000'):
+    if _tc_is_continuation(tc):
+        return
+    tcPr = _get_or_create_tcPr(tc)
+    for ex in tcPr.findall(qn('w:tcBorders')):
+        tcPr.remove(ex)
+    tcB = OxmlElement('w:tcBorders')
+    for edge in ('top', 'left', 'bottom', 'right'):
+        t = OxmlElement(f'w:{edge}')
+        t.set(qn('w:val'),   'single')
+        t.set(qn('w:sz'),    sz)
+        t.set(qn('w:space'), '0')
+        t.set(qn('w:color'), color)
+        tcB.append(t)
+    shd = tcPr.find(qn('w:shd'))
+    va  = tcPr.find(qn('w:vAlign'))
+    if shd is not None:
+        shd.addprevious(tcB)
+    elif va is not None:
+        va.addprevious(tcB)
     else:
-        fname = f'IGNOU_Award_{len(courses)}_Courses_{session_label.replace(" ","_")}.docx'
-
-    return send_file(
-        io.BytesIO(fixed),
-        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        as_attachment=True,
-        download_name=fname,
-    )
+        tcPr.append(tcB)
 
 
-if __name__ == '__main__':
-    print('\n' + '='*55)
-    print('  IGNOU RC-71 · Award List Generator')
-    print('='*55)
-    print('  ✅ Starting...')
-    print('  🌐 Open:  http://localhost:5050')
-    print('  ⛔ Stop:  Ctrl+C')
-    print('='*55 + '\n')
-    app.run(host='127.0.0.1', port=5050, debug=False)
+def apply_bg(tc, fill):
+    if _tc_is_continuation(tc):
+        return
+    tcPr = _get_or_create_tcPr(tc)
+    for ex in tcPr.findall(qn('w:shd')):
+        tcPr.remove(ex)
+    shd = OxmlElement('w:shd')
+    shd.set(qn('w:val'),   'clear')
+    shd.set(qn('w:color'), 'auto')
+    shd.set(qn('w:fill'),  fill)
+    va = tcPr.find(qn('w:vAlign'))
+    if va is not None:
+        va.addprevious(shd)
+    else:
+        tcPr.append(shd)
+
+
+def set_valign(tc, val='center'):
+    if _tc_is_continuation(tc):
+        return
+    tcPr = _get_or_create_tcPr(tc)
+    for ex in tcPr.findall(qn('w:vAlign')):
+        tcPr.remove(ex)
+    va = OxmlElement('w:vAlign')
+    va.set(qn('w:val'), val)
+    tcPr.append(va)
+
+
+def set_cell_text(tc, text, bold=False, size=9, align=WD_ALIGN_PARAGRAPH.CENTER):
+    if _tc_is_continuation(tc):
+        return
+    set_valign(tc)
+    p_el = tc.find(qn('w:p'))
+    if p_el is None:
+        p_el = OxmlElement('w:p')
+        tc.append(p_el)
+    for r in p_el.findall(qn('w:r')):
+        p_el.remove(r)
+    pPr = p_el.find(qn('w:pPr'))
+    if pPr is None:
+        pPr = OxmlElement('w:pPr')
+        p_el.insert(0, pPr)
+    for tag in (qn('w:spacing'), qn('w:jc')):
+        for ex in pPr.findall(tag):
+            pPr.remove(ex)
+    sp = OxmlElement('w:spacing')
+    sp.set(qn('w:before'), '20')
+    sp.set(qn('w:after'),  '20')
+    pPr.append(sp)
+    jc_map = {
+        WD_ALIGN_PARAGRAPH.CENTER: 'center',
+        WD_ALIGN_PARAGRAPH.LEFT:   'left',
+        WD_ALIGN_PARAGRAPH.RIGHT:  'right',
+    }
+    jc = OxmlElement('w:jc')
+    jc.set(qn('w:val'), jc_map.get(align, 'center'))
+    pPr.append(jc)
+    r_el = OxmlElement('w:r')
+    rPr  = OxmlElement('w:rPr')
+    if bold:
+        rPr.append(OxmlElement('w:b'))
+    fnt = OxmlElement('w:rFonts')
+    fnt.set(qn('w:ascii'), 'Times New Roman')
+    fnt.set(qn('w:hAnsi'), 'Times New Roman')
+    rPr.append(fnt)
+    sz_el = OxmlElement('w:sz')
+    sz_el.set(qn('w:val'), str(int(size * 2)))
+    rPr.append(sz_el)
+    r_el.append(rPr)
+    t_el = OxmlElement('w:t')
+    t_el.text = text
+    if text != text.strip():
+        t_el.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    r_el.append(t_el)
+    p_el.append(r_el)
+
+
+def set_col_width(tc, dxa):
+    tcPr = _get_or_create_tcPr(tc)
+    for ex in tcPr.findall(qn('w:tcW')):
+        tcPr.remove(ex)
+    tcW = OxmlElement('w:tcW')
+    tcW.set(qn('w:w'),    str(dxa))
+    tcW.set(qn('w:type'), 'dxa')
+    tcPr.insert(0, tcW)
+
+
+# ─────────────────────────────────────────────────────────────
+# Single-page form builder (adds content into an existing doc)
+# ─────────────────────────────────────────────────────────────
+
+def _build_form_page(doc, candidates, course_code, session_label):
+    """
+    Append one complete IGNOU Award/Grade List form into `doc`.
+    session_label: e.g. 'Jun 2024' or 'Dec 2024'
+    """
+    CW = 9638  # content width DXA for A4 with 2 cm margins
+
+    def para(text='', bold=False, size=11, align=WD_ALIGN_PARAGRAPH.CENTER,
+             sb=0, sa=2, underline=False):
+        p = doc.add_paragraph()
+        p.alignment = align
+        p.paragraph_format.space_before = Pt(sb)
+        p.paragraph_format.space_after  = Pt(sa)
+        if text:
+            r = p.add_run(text)
+            r.bold = bold; r.underline = underline
+            r.font.size = Pt(size); r.font.name = 'Times New Roman'
+        return p
+
+    def info_line(lbl1, val1, lbl2, val2, sa=2):
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(sa)
+        p.paragraph_format.tab_stops.add_tab_stop(Inches(3.35))
+        for txt, ul in [(lbl1, False), (val1, True), ('\t', False), (lbl2, False), (val2, True)]:
+            r = p.add_run(txt)
+            r.underline = ul
+            r.font.size = Pt(9)
+            r.font.name = 'Times New Roman'
+
+    # ── HEADER ──
+    para('INDIRA GANDHI NATIONAL OPEN UNIVERSITY', bold=True, size=13, sa=1)
+    para('Study Centre & Code : Naval Headquarters, DNE, RK Puram , New Delhi (Code -7101)',
+         size=9, sa=2)
+    para('AWARD/GRADE LIST FOR ASSIGNMENTS', bold=True, size=11, underline=True, sa=1)
+    para(f'For TEE {session_label} Session', size=9, sa=4)
+
+    info_line('Programme: ', 'x', 'Course Code: ', course_code)
+    info_line('Study Centre: ', '7101, NAVY', 'Assignment No: ', '_' * 10)
+    info_line('Place: ', 'WEST BLOK - V, PORTA CABIN, SECTOR-1, RK PURAM',
+              '  For MA Maximum Marks: ', '100', sa=4)
+    para('Please arrange Enrolment Nos. in ascending order only and write', size=9, sa=0)
+    para('Complete and correct enrolment number in nine digits.', size=9, sa=4)
+
+    # ── TABLE ──
+    raw_w = [520, 1480, 2480, 1440, 860, 860, 860, 1138]
+    scale = CW / sum(raw_w)
+    COL_W = [int(w * scale) for w in raw_w]
+    COL_W[-1] = CW - sum(COL_W[:-1])
+
+    data_rows  = max(25, len(candidates))
+    total_rows = 2 + data_rows
+
+    tbl = doc.add_table(rows=total_rows, cols=8)
+    tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+    for row in tbl.rows:
+        for ci, cell in enumerate(row.cells):
+            set_col_width(cell._tc, COL_W[ci])
+
+    # Merges first
+    tbl.rows[0].cells[4].merge(tbl.rows[0].cells[6])
+    for col in [0, 1, 2, 3, 7]:
+        tbl.rows[0].cells[col].merge(tbl.rows[1].cells[col])
+
+    rows_xml = tbl._tbl.findall(qn('w:tr'))
+    r0_tcs   = rows_xml[0].findall(qn('w:tc'))
+    r1_tcs   = rows_xml[1].findall(qn('w:tc'))
+
+    HBG   = 'C0CCE0'
+    HSIZE = 8
+
+    for tc, text, align in [
+        (r0_tcs[0], 'Sl.\nNo',           WD_ALIGN_PARAGRAPH.CENTER),
+        (r0_tcs[1], 'Enrolment No.',      WD_ALIGN_PARAGRAPH.CENTER),
+        (r0_tcs[2], 'Name of Candidate',  WD_ALIGN_PARAGRAPH.CENTER),
+        (r0_tcs[3], 'Programme',          WD_ALIGN_PARAGRAPH.CENTER),
+        (r0_tcs[4], 'Grade/Award',        WD_ALIGN_PARAGRAPH.CENTER),
+        (r0_tcs[5], 'Remarks\nif any',    WD_ALIGN_PARAGRAPH.CENTER),
+    ]:
+        set_cell_text(tc, text, bold=True, size=HSIZE, align=align)
+        apply_borders(tc, sz='6')
+        apply_bg(tc, HBG)
+
+    for tc, text in [(r1_tcs[4], 'TMA-I'), (r1_tcs[5], 'TMA-II'), (r1_tcs[6], 'TMA-III')]:
+        set_cell_text(tc, text, bold=True, size=HSIZE)
+        apply_borders(tc, sz='6')
+        apply_bg(tc, HBG)
+
+    aligns = [
+        WD_ALIGN_PARAGRAPH.CENTER,
+        WD_ALIGN_PARAGRAPH.LEFT,
+        WD_ALIGN_PARAGRAPH.LEFT,
+        WD_ALIGN_PARAGRAPH.LEFT,
+        WD_ALIGN_PARAGRAPH.CENTER,
+        WD_ALIGN_PARAGRAPH.CENTER,
+        WD_ALIGN_PARAGRAPH.CENTER,
+        WD_ALIGN_PARAGRAPH.CENTER,
+    ]
+
+    for i in range(data_rows):
+        row_xml = rows_xml[2 + i]
+        trPr = row_xml.find(qn('w:trPr'))
+        if trPr is None:
+            trPr = OxmlElement('w:trPr')
+            row_xml.insert(0, trPr)
+        for ex in trPr.findall(qn('w:trHeight')):
+            trPr.remove(ex)
+        trH = OxmlElement('w:trHeight')
+        trH.set(qn('w:val'), '240')
+        trPr.append(trH)
+
+        row_tcs = row_xml.findall(qn('w:tc'))
+        if i < len(candidates):
+            c    = candidates[i]
+            vals = [str(i + 1), c['enrollment'], c['name'], c['programme'], '', '', '', '']
+        else:
+            vals = [str(i + 1), '', '', '', '', '', '', '']
+
+        for j, (tc, val) in enumerate(zip(row_tcs, vals)):
+            set_cell_text(tc, val, size=9, align=aligns[j])
+            apply_borders(tc, sz='4')
+
+    # ── SIGNATURE BLOCK ──
+    p_gap = doc.add_paragraph()
+    p_gap.paragraph_format.space_before = Pt(10)
+    p_gap.paragraph_format.space_after  = Pt(0)
+
+    sig_lines = [
+        ('Signature of Co-ordinator________________', 'Signature of Evaluation________________'),
+        ('Date____________________',                  'Date____________________'),
+        ('Office Stamp',                              'Name & Address_________________________________'),
+    ]
+    for left, right in sig_lines:
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(5)
+        p.paragraph_format.tab_stops.add_tab_stop(Inches(3.35))
+        for txt in [left, '\t', right]:
+            r = p.add_run(txt)
+            r.font.size = Pt(9)
+            r.font.name = 'Times New Roman'
+
+
+def _add_page_break(doc):
+    """Insert a hard page break paragraph between course pages."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after  = Pt(0)
+    run = p.add_run()
+    br  = OxmlElement('w:br')
+    br.set(qn('w:type'), 'page')
+    run._r.append(br)
+
+
+# ─────────────────────────────────────────────────────────────
+# Public API
+# ─────────────────────────────────────────────────────────────
+
+def generate_award_list(course_candidates_map, session_label='Dec 2024'):
+    """
+    Generate one page per course into a single .docx file.
+
+    course_candidates_map : OrderedDict / dict  {course_code: [candidate dicts]}
+                            Each candidate dict: {enrollment, name, programme}
+    session_label         : 'Jun 2024'  or  'Dec 2024'
+    Returns               : BytesIO of the .docx
+    """
+    doc = Document()
+
+    # Page setup — applied once; all pages share these margins
+    sec = doc.sections[0]
+    sec.page_width    = Cm(21)
+    sec.page_height   = Cm(29.7)
+    sec.top_margin    = Cm(1.5)
+    sec.bottom_margin = Cm(1.5)
+    sec.left_margin   = Cm(2.0)
+    sec.right_margin  = Cm(2.0)
+
+    courses = list(course_candidates_map.items())
+
+    for idx, (course_code, candidates) in enumerate(courses):
+        # Sort candidates by enrollment number ascending
+        def enroll_key(c):
+            n = ''.join(filter(str.isdigit, str(c.get('enrollment', ''))))
+            return int(n) if n else 0
+        candidates = sorted(candidates, key=enroll_key)
+
+        _build_form_page(doc, candidates, course_code, session_label)
+
+        # Add page break after every page EXCEPT the last
+        if idx < len(courses) - 1:
+            _add_page_break(doc)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
